@@ -1,4 +1,4 @@
-#![feature(generators, generator_trait, try_from)]
+#![feature(generators, generator_trait, try_from, never_type)]
 
 #[derive(Debug)]
 pub(crate) struct Eff;

@@ -23,6 +23,7 @@ pub fn eff(attr: TokenStream, item: TokenStream) -> TokenStream {
     let types = effects_parser
         .parse(attr)
         .expect("failed to parse attribute");
+    let types = &types;
 
     let names: Vec<_> = types
         .iter()
@@ -34,6 +35,7 @@ pub fn eff(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     if let syn::Item::Fn(mut func) = item {
         let mut ret = TokenStream2::new();
+        /*
 
         let effects_type_name = Ident::new(
             &format!("__effects_{}", func.ident),
@@ -110,7 +112,41 @@ pub fn eff(attr: TokenStream, item: TokenStream) -> TokenStream {
             };
             ret.extend(impl_channel);
         }
+        */
 
+        let effects_type_name = quote! {
+            eff::Coproduct![#types]
+        };
+
+        let channel_type_name = quote! {
+            eff::CoproductChannel![#types]
+        };
+
+        let indices = types.iter().enumerate().map(|(i, _)| Ident::new(
+            &format!("Index{}", i),
+            Span::call_site(),
+        )).collect::<Vec<_>>();
+        let indices = &indices;
+
+        for index in indices.iter() {
+            func.decl.generics.params.push(syn::parse2(quote! {
+                #index
+            }).unwrap());
+        }
+
+        func.decl.generics.params.push(
+            syn::parse2(quote! {
+                E: #(eff::coproduct::eff::Inject<#types, #indices>)+*
+            }).unwrap(),
+        );
+
+        func.decl.generics.params.push(
+            syn::parse2(quote! {
+                C: #(eff::coproduct::channel::Uninject<#types, #indices>)+*
+            }).unwrap(),
+        );
+
+        /*
         func.decl.generics.params.push(
             syn::parse2(quote! {
                 E: #(std::convert::From<#types>)+*
@@ -124,6 +160,7 @@ pub fn eff(attr: TokenStream, item: TokenStream) -> TokenStream {
             })
             .unwrap(),
         );
+        */
 
         func.decl.generics.params.push(
             syn::parse2(quote! {
@@ -227,8 +264,10 @@ impl<'a> syn::visit_mut::VisitMut for ResumeMuncher<'a> {
 
 #[proc_macro_hack::proc_macro_hack]
 pub fn handler(input: TokenStream) -> TokenStream {
+    use proc_macro2::Span;
     use syn::parse::Parser;
     use syn::punctuated::Punctuated;
+    use syn::Ident;
 
     let parser = Punctuated::<HandlerEntry, Token![,]>::parse_terminated;
     let entries = parser.parse(input).expect("parsing a handler failed");
@@ -274,10 +313,10 @@ pub fn handler(input: TokenStream) -> TokenStream {
                 syn::visit_mut::visit_expr_mut(&mut ResumeMuncher(&effect_type), &mut expr);
 
                 let code = quote! {
-                    match TryInto::<#effect_type>::try_into(eff) {
+                    let eff = match eff.uninject::<#effect_type, _>() {
                         Ok(#pattern) => return eff::HandlerResult::Exit(#expr),
-                        Err(e) => eff = e,
-                    }
+                        Err(e) => e,
+                    };
                 };
 
                 inner.extend(code);
@@ -287,15 +326,17 @@ pub fn handler(input: TokenStream) -> TokenStream {
 
     let effect_types = &effect_types;
 
+    let indices = effect_types.iter().enumerate().map(|(i, _)| Ident::new(&format!("Index{}", i), Span::call_site())).collect::<Vec<_>>();
+    let indices = &indices;
+
     match return_type {
         Some(ty) => quote! {{
-            use std::convert::TryInto;
             #[allow(unreachable_code)]
             #[inline]
-            fn __effect_handler<E, C>(mut eff: E) -> eff::HandlerResult<#ty, C>
+            fn __effect_handler<E, C, #(#indices),*>(mut eff: E) -> eff::HandlerResult<#ty, C>
             where
-                E: #(TryInto<#effect_types , Error = E>)+*,
-                C: #(eff::Channel<#effect_types>)+*,
+                E: #(eff::coproduct::eff::Uninject<#effect_types , #indices>)+*,
+                C: #(eff::coproduct::eff::Inject<#effect_types , #indices>)+*,
             {
                 {
                     #inner
@@ -306,13 +347,12 @@ pub fn handler(input: TokenStream) -> TokenStream {
         }},
         // generic handler
         None => quote! {{
-            use std::convert::TryInto;
             #[allow(unreachable_code)]
             #[inline]
-            fn __effect_handler<E, R, C>(mut eff: E) -> eff::HandlerResult<R, C>
+            fn __effect_handler<E, R, C, #(#indices),*>(mut eff: E) -> eff::HandlerResult<R, C>
             where
-                E: #(TryInto<#effect_types , Error = E>)+*,
-                C: #(eff::Channel<#effect_types>)+*,
+                E: #(eff::coproduct::eff::Uninject<#effect_types , #indices>)+*,
+                C: #(eff::coproduct::eff::Inject<#effect_types , #indices>)+*,
             {
                 {
                     #inner

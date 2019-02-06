@@ -1,4 +1,4 @@
-#![feature(nll, generators, generator_trait, unsized_locals)]
+#![feature(nll, generators, generator_trait, unsized_locals, never_type)]
 #![feature(trace_macros)]
 
 use std::cell::RefCell;
@@ -12,20 +12,42 @@ use rich_phantoms::PhantomCovariantAlwaysSendSync;
 
 pub use eff_attr::eff;
 
+pub mod coproduct;
+
+#[macro_export]
+macro_rules! Coproduct {
+    () => {
+        !
+    };
+    ($head:ty $(,$tail:ty)* $(,)?) => {
+        $crate::coproduct::eff::Either<$head, $crate::Coproduct![$($tail),*]>
+    };
+}
+
+#[macro_export]
+macro_rules! CoproductChannel {
+    () => {
+        !
+    };
+    ($head:ty $(,$tail:ty)* $(,)?) => {
+        $crate::coproduct::channel::Either<$head, $crate::CoproductChannel![$($tail),*]>
+    };
+}
+
 #[macro_export]
 macro_rules! perform {
     ($eff:expr) => {{
         #[inline(always)]
-        fn __getter<'e, 'c, E: $crate::Effect, C: $crate::Channel<E> + 'c>(
+        fn __getter<'e, 'c, Index, E: $crate::Effect, C: $crate::coproduct::channel::Uninject<E, Index> + 'c>(
             _: &'e E,
             store: $crate::Store<C>,
         ) -> impl FnOnce() -> <E as $crate::Effect>::Output + 'c {
-            move || store.get::<E>()
+            move || store.get_copro::<E, _>()
         }
         let store = $crate::Store::new();
         let eff = $eff;
         let getter = __getter(&eff, store.clone());
-        yield $crate::Suspension::Perform(store.clone(), Into::into(eff));
+        yield $crate::Suspension::Perform(store.clone(), $crate::coproduct::eff::Inject::inject(eff));
         getter()
     }};
 }
@@ -49,7 +71,7 @@ pub use eff_attr::handler;
 #[macro_export]
 macro_rules! resume {
     (@$eff_type:ty, $e:expr) => {{
-        return eff::HandlerResult::Resume(eff::Channel::<$eff_type>::from($e));
+        return eff::HandlerResult::Resume(eff::coproduct::channel::Inject::<$eff_type, _>::inject($e));
     }};
 }
 
@@ -69,6 +91,20 @@ pub trait Effect {
     type Output;
 }
 
+impl<'a, E> Effect for &'a E
+where
+    E: Effect,
+{
+    type Output = &'a E::Output;
+}
+
+impl<'a, E> Effect for &'a mut E
+where
+    E: Effect,
+{
+    type Output = &'a mut E::Output;
+}
+
 pub struct WithEffectInner<PE, PC, G> {
     pub inner: G,
     phantom: PhantomCovariantAlwaysSendSync<fn() -> (PE, PC)>,
@@ -83,6 +119,16 @@ impl<PE, PC, G> WithEffectInner<PE, PC, G> {
             phantom: PhantomData,
         }
     }
+}
+
+pub trait WithEffect {
+    type Effects;
+    type Channels;
+}
+
+impl<PE, PC, G> WithEffect for WithEffectInner<PE, PC, G> {
+    type Effects = PE;
+    type Channels = PC;
 }
 
 pub trait Channel<E>
@@ -149,6 +195,18 @@ impl<C> Store<C> {
         let value = self.inner.borrow_mut().take().unwrap();
         value.into()
     }
+
+    pub fn get_copro<E, Index>(&self) -> E::Output
+    where
+        E: Effect,
+        C: coproduct::channel::Uninject<E, Index>,
+    {
+        let value = self.inner.borrow_mut().take().unwrap();
+        match value.uninject() {
+            Ok(x) => x,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl<C> Clone for Store<C> {
@@ -205,9 +263,6 @@ where
     VH: FnOnce(T) -> R,
 {
     loop {
-        // this resume is safe since the generator is pinned in a heap
-        // FIXME: the above line is not the case since G might be &mut Generator.
-        // Wait until pinning API arrives
         let state = expr.as_mut().inner().resume();
         match state {
             GeneratorState::Yielded(Suspension::Perform(store, effect)) => match handler(effect) {
@@ -229,4 +284,11 @@ pub enum HandlerResult<R, C> {
     Resume(C),
     Exit(R),
     Unhandled,
+}
+
+pub fn satisfy_type<R, G, E, C>(_expr: Pin<&mut WithEffectInner<E, C, G>>) -> R
+where
+    G: Generator<Yield = Suspension<E, C, R>, Return = R>
+{
+    unreachable!()
 }
